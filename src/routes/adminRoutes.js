@@ -53,6 +53,7 @@ router.get('/stats', getDashboardStats);
 router.get('/organization', getOrganization);
 router.post('/organization', createOrganization);
 router.put('/organization/:id', updateOrganization);
+router.post('/organizations/:id/complete-setup', (req, res) => res.status(200).json({ success: true, message: 'Setup marked complete' }));
 
 // Departments
 router.get('/departments', getDepartments);

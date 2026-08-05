@@ -155,6 +155,9 @@ const getDashboardStats = async (req, res, next) => {
 const getOrganization = async (req, res, next) => {
   try {
     const org = await prisma.organization.findFirst();
+    if (org) {
+      org.setupComplete = true;
+    }
     return res.status(200).json({ success: true, data: org });
   } catch (err) { next(err); }
 };
