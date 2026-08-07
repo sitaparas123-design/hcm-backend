@@ -6,12 +6,13 @@
 const express = require('express');
 const router = express.Router();
 
-const { login, register, getMe, changePassword, getMyPermissions } = require('../controllers/authController');
+const { login, register, getMe, changePassword, getMyPermissions, resetForgottenPassword } = require('../controllers/authController');
 const { protect } = require('../middlewares/authMiddleware');
 
 // Public Routes (login ke bina access)
 router.post('/login', login);         // POST /api/auth/login
 router.post('/register', register);   // POST /api/auth/register
+router.post('/reset-forgotten-password', resetForgottenPassword); // POST /api/auth/reset-forgotten-password
 
 // Protected Routes (JWT token required)
 router.get('/me', protect, getMe);    // GET /api/auth/me

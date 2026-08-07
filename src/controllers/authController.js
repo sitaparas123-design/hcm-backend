@@ -359,4 +359,39 @@ const getMyPermissions = async (req, res, next) => {
   }
 };
 
-module.exports = { login, register, getMe, changePassword, getMyPermissions };
+const resetForgottenPassword = async (req, res, next) => {
+  try {
+    const { email, newPassword } = req.body;
+    if (!email || !newPassword) {
+      return res.status(400).json({ success: false, error: { message: 'Email and new password are required.' } });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ success: false, error: { message: 'User not found with this email.' } });
+    }
+
+    const newPasswordHash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: newPasswordHash }
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: 'PASSWORD_RESET_FORGOT',
+        details: 'User reset their password via Forgot Password flow',
+        ipAddress: req.ip || 'Unknown',
+        device: req.headers['user-agent'] || 'Unknown',
+        level: 'Warning'
+      }
+    });
+
+    return res.status(200).json({ success: true, message: 'Password reset successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { login, register, getMe, changePassword, getMyPermissions, resetForgottenPassword };
