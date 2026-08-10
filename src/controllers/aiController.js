@@ -4,34 +4,65 @@ const getAiServerUrl = () => process.env.AI_SERVER_URL || 'http://localhost:4000
 const aiBuildResume = async (req, res, next) => {
   try {
     const { details } = req.body;
-    const response = await fetch(`${getAiServerUrl()}/api/mcp/resume/create`, {
+    const response = await fetch(`${getAiServerUrl()}/api/mcp/resume/summary`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ details })
+      body: JSON.stringify({ details: details || {} })
     });
     const result = await response.json();
-    return res.status(response.status).json(result);
+    const actualData = result.data || result;
+    return res.status(response.status || 200).json({
+      success: true,
+      data: actualData,
+      requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+    });
   } catch (err) { next(err); }
 };
 
 // POST /api/employee/ai/policy-assistant
 const aiPolicyAssistant = async (req, res, next) => {
   try {
-    const { query } = req.body;
-    const tenantId = req.user.organizationId || 'global';
-    const accessLevel = req.user.role || 'EMPLOYEE';
-    const response = await fetch(`${getAiServerUrl()}/api/mcp/chat`, {
+    const { query, history, pageContext } = req.body;
+
+    if (!query || typeof query !== 'string' || !query.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_QUERY', message: 'Question/query is required.' },
+        requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+      });
+    }
+
+    const tenantId = req.user?.organizationId || req.user?.tenantId || 'global';
+    const accessLevel = req.user?.role || 'EMPLOYEE';
+
+    const response = await fetch(`${getAiServerUrl()}/api/mcp/policy/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        messages: [{ role: 'user', content: query }],
+        query: query.trim(),
+        history: history || [],
         tenantId,
-        accessLevel
+        accessLevel,
+        pageContext: pageContext || '/employee/help'
       })
     });
+
     const result = await response.json();
-    return res.status(response.status).json(result);
-  } catch (err) { next(err); }
+    const actualData = result.data || result;
+
+    return res.status(response.status || 200).json({
+      success: true,
+      data: actualData,
+      requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+    });
+  } catch (err) {
+    console.error("AI Policy Assistant failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      error: { code: 'POLICY_ASSISTANT_FAILED', message: err.message || 'AI Policy Assistant is temporarily unavailable.' },
+      requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+    });
+  }
 };
 
 // GET /api/manager/ai/attendance-insights
@@ -146,16 +177,112 @@ const aiPerformanceSummaries = async (req, res, next) => {
 
 // POST /api/employee/ai/document-analyze
 const aiDocumentAnalyze = async (req, res, next) => {
+  const fs = require('fs');
+  const http = require('http');
+
   try {
-    const { documentId, documentText } = req.body;
-    const response = await fetch(`${getAiServerUrl()}/api/mcp/document/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentText, context: `Document ID: ${documentId}` })
+    if (!req.file) {
+      console.warn("[AI OCR] File missing or rejected by multer fileFilter");
+      return res.status(400).json({
+        success: false,
+        error: { code: 'DOCUMENT_MISSING', message: 'Please select a supported document (PDF, PNG, JPG, JPEG, or TXT) under 10MB.' },
+        requestId: 'req-' + Math.random().toString(36).substr(2, 9)
+      });
+    }
+
+    console.log("[AI OCR] File received:", {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      path: req.file.path
     });
-    const result = await response.json();
-    return res.status(response.status).json(result);
-  } catch (err) { next(err); }
+
+    const filePath = req.file.path;
+    const fileBuffer = fs.readFileSync(filePath);
+
+    // Construct multipart form-data payload manually
+    const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substr(2, 9);
+    const cleanFileName = (req.file.originalname || 'document').replace(/"/g, '');
+    const header = Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${cleanFileName}"\r\n` +
+      `Content-Type: ${req.file.mimetype || 'application/octet-stream'}\r\n\r\n`
+    );
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const bodyBuffer = Buffer.concat([header, fileBuffer, footer]);
+
+    console.log("[AI OCR] Starting analysis stream to AI Server...");
+
+    const aiUrl = new URL(`${getAiServerUrl()}/api/mcp/document/analyze`);
+    const opts = {
+      hostname: aiUrl.hostname,
+      port: aiUrl.port,
+      path: aiUrl.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': bodyBuffer.length
+      },
+      timeout: 45000
+    };
+
+    // Send request using built-in http module
+    const aiResponse = await new Promise((resolve, reject) => {
+      const apiReq = http.request(opts, (apiRes) => {
+        let raw = '';
+        apiRes.on('data', c => raw += c);
+        apiRes.on('end', () => {
+          let json = null;
+          try { json = JSON.parse(raw); } catch {}
+          resolve({ status: apiRes.statusCode, json, raw });
+        });
+      });
+      apiReq.on('error', reject);
+      apiReq.on('timeout', () => {
+        apiReq.destroy();
+        reject(new Error('AI Server request timed out.'));
+      });
+      apiReq.write(bodyBuffer);
+      apiReq.end();
+    });
+
+    // Clean up temporary upload file from disk
+    fs.unlink(filePath, (err) => {
+      if (err) console.error("Failed to delete temporary upload file:", err.message);
+    });
+
+    if (aiResponse.status !== 200) {
+      console.error("[AI OCR] AI Server error response:", aiResponse.status, aiResponse.raw);
+      throw new Error(aiResponse.json?.error || aiResponse.json?.error?.message || `AI Server returned status ${aiResponse.status}`);
+    }
+
+    console.log("[AI OCR] AI analysis completed successfully.");
+    const aiResult = aiResponse.json;
+    const actualData = aiResult?.data || aiResult;
+
+    return res.status(200).json({
+      success: true,
+      data: actualData,
+      requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+    });
+  } catch (err) {
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (unlinkErr) {
+        console.error("Failed to delete temporary file in catch block:", unlinkErr.message);
+      }
+    }
+    
+    console.error("[AI OCR] Analysis failed:", err.message);
+    const code = err.message.toLowerCase().includes('scanned') ? 'OCR_EMPTY' : 'AI_ANALYSIS_FAILED';
+    
+    return res.status(500).json({
+      success: false,
+      error: { code, message: err.message || 'AI document processing failed.' },
+      requestId: req.headers['x-request-id'] || 'req-' + Math.random().toString(36).substr(2, 9)
+    });
+  }
 };
 
 // POST /api/superadmin/ai/analytics

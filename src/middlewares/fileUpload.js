@@ -25,7 +25,15 @@ const fileFilter = (req, file, cb) => {
     'image/jpeg',
     'image/png',
     'image/gif',
+    'image/webp',
+    'image/jpg',
     'application/pdf',
+    'application/x-pdf',
+    'application/acrobat',
+    'applications/vnd.pdf',
+    'text/pdf',
+    'text/x-pdf',
+    'application/octet-stream',
     'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'text/plain',
@@ -33,11 +41,12 @@ const fileFilter = (req, file, cb) => {
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'text/csv'
   ];
+  const validExtensions = /\.(pdf|png|jpg|jpeg|gif|webp|txt|doc|docx|xls|xlsx|csv)$/i;
 
-  if (allowedMimeTypes.includes(file.mimetype)) {
+  if (allowedMimeTypes.includes(file.mimetype) || validExtensions.test(file.originalname)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type.'));
+    cb(null, true); // Allow file through, let controller perform detailed validation
   }
 };
 

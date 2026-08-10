@@ -81,11 +81,12 @@ const {
   aiDocumentAnalyze,
   aiGenerateLetter
 } = require('../controllers/aiController');
+const fileUpload = require('../middlewares/fileUpload');
 
 router.post('/ai/resume-builder', aiBuildResume);
 router.post('/ai/policy-assistant', aiPolicyAssistant);
 router.post('/ai/payroll-insights', aiPayrollInsights);
-router.post('/ai/document-analyze', aiDocumentAnalyze);
+router.post('/ai/document-analyze', fileUpload.single('file'), aiDocumentAnalyze);
 router.post('/ai/generate-letter', aiGenerateLetter);
 
 module.exports = router;
