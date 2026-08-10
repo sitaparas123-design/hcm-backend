@@ -54,4 +54,15 @@ router.patch('/resignations/:id', reviewResignation);
 router.get('/reimbursements', getManagerReimbursements);
 router.patch('/reimbursements/:id/review', reviewManagerReimbursement);
 
+// AI Features
+const {
+  aiAttendanceInsights,
+  aiLeaveRecommendations,
+  aiPerformanceSummaries
+} = require('../controllers/aiController');
+
+router.get('/ai/attendance-insights', aiAttendanceInsights);
+router.post('/ai/leave-recommendations', aiLeaveRecommendations);
+router.post('/ai/performance-summaries', aiPerformanceSummaries);
+
 module.exports = router;

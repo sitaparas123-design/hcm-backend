@@ -1062,7 +1062,7 @@ const getOffers = async (req, res, next) => {
 // POST /api/hr/offers
 const createOffer = async (req, res, next) => {
   try {
-    const { candidate, role, salary, joiningDate, status, sentDate, applicationId } = req.body;
+    const { candidate, role, salary, joiningDate, status, sentDate, applicationId, letterContent } = req.body;
     const offer = await prisma.offer.create({
       data: {
         applicationId: applicationId || null,
@@ -1071,7 +1071,8 @@ const createOffer = async (req, res, next) => {
         salary: salary || '',
         joiningDate: joiningDate || '',
         status: status || 'Sent',
-        sentDate: sentDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        sentDate: sentDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        letterContent: letterContent || null
       }
     });
 
@@ -1087,7 +1088,7 @@ const createOffer = async (req, res, next) => {
 // PUT /api/hr/offers/:id
 const updateOffer = async (req, res, next) => {
   try {
-    const { candidate, role, salary, joiningDate, status, sentDate } = req.body;
+    const { candidate, role, salary, joiningDate, status, sentDate, letterContent } = req.body;
     const offer = await prisma.offer.update({
       where: { id: req.params.id },
       data: {
@@ -1096,7 +1097,8 @@ const updateOffer = async (req, res, next) => {
         salary,
         joiningDate,
         status,
-        sentDate
+        sentDate,
+        letterContent
       }
     });
     return res.status(200).json({ success: true, data: offer });

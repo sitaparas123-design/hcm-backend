@@ -73,4 +73,19 @@ router.delete('/documents/:id', deleteDocument);
 router.get('/policies', getPolicies);
 router.post('/policies/:id/acknowledge', acknowledgePolicy);
 
+// AI Features
+const {
+  aiBuildResume,
+  aiPolicyAssistant,
+  aiPayrollInsights,
+  aiDocumentAnalyze,
+  aiGenerateLetter
+} = require('../controllers/aiController');
+
+router.post('/ai/resume-builder', aiBuildResume);
+router.post('/ai/policy-assistant', aiPolicyAssistant);
+router.post('/ai/payroll-insights', aiPayrollInsights);
+router.post('/ai/document-analyze', aiDocumentAnalyze);
+router.post('/ai/generate-letter', aiGenerateLetter);
+
 module.exports = router;

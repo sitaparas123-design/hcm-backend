@@ -66,4 +66,8 @@ router.put('/payroll/:id', updatePayslip);
 router.delete('/payroll/:id', deletePayslip);
 router.patch('/payroll/bulk-approve', bulkApprovePayslips);
 
+// AI Features
+const { aiAnalytics } = require('../controllers/aiController');
+router.post('/ai/analytics', aiAnalytics);
+
 module.exports = router;

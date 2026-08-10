@@ -26,6 +26,7 @@ const importRoutes      = require('./src/routes/importRoutes');
 const reimbursementRoutes = require('./src/routes/reimbursementRoutes');
 const calendarRoutes    = require('./src/routes/calendarRoutes');
 const approvalWorkflowRoutes = require('./src/routes/approvalWorkflow.routes');
+const copilotRoutes = require('./src/routes/copilotRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -109,6 +110,7 @@ app.use('/api/import',      importRoutes);      // Generic Excel Import Engine
 app.use('/api/reimbursements', reimbursementRoutes);
 app.use('/api/admin/calendars', calendarRoutes);
 app.use('/api', approvalWorkflowRoutes); // Workflow Configuration & Actions
+app.use('/api/copilot', copilotRoutes);
 
 // ---- GLOBAL ERROR HANDLER (hamesha last mein) ----
 app.use(errorHandler);

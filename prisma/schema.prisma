@@ -981,6 +981,7 @@ model Offer {
   joiningDate   String
   status        String          @default("Sent")
   sentDate      String
+  letterContent String?         @db.LongText
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
