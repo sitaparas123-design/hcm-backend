@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 const { isWorkflowEnabled, startWorkflow, processApproval } = require('../services/approval.service');
 const { generatePayrollSnapshot } = require('../services/payrollEngineService');
 

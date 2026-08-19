@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 
 const getAiServerUrl = () => process.env.AI_SERVER_URL || 'http://localhost:4000';
 

@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 
 // GET /api/pricing
 // Fetch all active pricing plans (or all if ?all=true and user is superadmin)

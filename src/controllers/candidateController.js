@@ -5,6 +5,7 @@
 
 const prisma = require('../config/prisma');
 const bcrypt = require('bcryptjs');
+const { handleBase64Field } = require('../services/cloudUploadService');
 
 // GET /api/candidate/jobs  (all active jobs)
 const getAvailableJobs = async (req, res, next) => {
@@ -185,43 +186,30 @@ const updateCandidateProfile = async (req, res, next) => {
       });
     }
 
-    const handleBase64Upload = (base64Str, fallbackUrl, filenamePrefix) => {
-      if (base64Str) {
-        try {
-          const matches = base64Str.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-          if (matches && matches.length === 3) {
-            const fs = require('fs');
-            const path = require('path');
-            const fileBuffer = Buffer.from(matches[2], 'base64');
-            const ext = matches[1].split('/')[1] === 'pdf' ? 'pdf' : matches[1].split('/')[1] === 'msword' ? 'doc' : matches[1].split('/')[1] === 'vnd.openxmlformats-officedocument.wordprocessingml.document' ? 'docx' : matches[1].split('/')[1];
-            const safeName = `${filenamePrefix}.${ext}`;
-            const filename = `${Date.now()}_${safeName}`;
-            const uploadPath = path.join(__dirname, '../../public/uploads', filename);
-            fs.mkdirSync(path.dirname(uploadPath), { recursive: true });
-            fs.writeFileSync(uploadPath, fileBuffer);
-            console.log(`Saved file to ${uploadPath}`);
-            const baseUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
-            return `${baseUrl}/uploads/${filename}`;
-          } else {
-            console.log("Base64 regex did not match for", filenamePrefix);
-          }
-        } catch (err) {
-          console.error(`Failed to save uploaded ${filenamePrefix}:`, err);
-        }
-      } else {
-         console.log(`${filenamePrefix} base64Str is empty or falsy`);
-      }
-      return fallbackUrl; // return what was passed (could be null for deletion or existing url)
-    };
-
+    // Upload files to cloud (Cloudinary for images, ImageKit for documents)
+    // Falls back to local disk if cloud credentials not configured
     console.log("updateCandidateProfile called");
-    console.log("avatarBase64 present:", !!avatarBase64);
-    if (avatarBase64) console.log("avatarBase64 prefix:", avatarBase64.substring(0, 30));
 
-    const finalAvatarUrl = handleBase64Upload(avatarBase64, avatarUrl !== undefined ? avatarUrl : profile.avatarUrl, 'avatar');
-    const finalResumeUrl = handleBase64Upload(resumeBase64, resumeUrl !== undefined ? resumeUrl : profile.resumeUrl, 'resume');
-    const finalIdentityUrl = handleBase64Upload(identityProofBase64, identityProofUrl !== undefined ? identityProofUrl : profile.identityProofUrl, 'identity');
-    const finalEducationUrl = handleBase64Upload(educationProofBase64, educationProofUrl !== undefined ? educationProofUrl : profile.educationProofUrl, 'education');
+    const finalAvatarUrl = await handleBase64Field(
+      avatarBase64 || (avatarUrl !== undefined ? avatarUrl : null),
+      profile.avatarUrl,
+      { folder: 'hcm/avatars', filenamePrefix: 'avatar' }
+    );
+    const finalResumeUrl = await handleBase64Field(
+      resumeBase64 || (resumeUrl !== undefined ? resumeUrl : null),
+      profile.resumeUrl,
+      { folder: 'hcm/resumes', filenamePrefix: 'resume' }
+    );
+    const finalIdentityUrl = await handleBase64Field(
+      identityProofBase64 || (identityProofUrl !== undefined ? identityProofUrl : null),
+      profile.identityProofUrl,
+      { folder: 'hcm/documents', filenamePrefix: 'identity' }
+    );
+    const finalEducationUrl = await handleBase64Field(
+      educationProofBase64 || (educationProofUrl !== undefined ? educationProofUrl : null),
+      profile.educationProofUrl,
+      { folder: 'hcm/documents', filenamePrefix: 'education' }
+    );
 
     const updated = await prisma.candidateProfile.update({
       where: { userId: req.user.userId },

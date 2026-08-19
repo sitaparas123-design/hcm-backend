@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 const { evaluateFormula } = require('./formulaEngineService');
 const payrollCalculator = require('../utils/payrollCalculator');
 

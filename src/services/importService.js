@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 const bcrypt = require('bcryptjs');
 
 const DEFAULT_HASH = bcrypt.hashSync('defaultPassword123!', 10);

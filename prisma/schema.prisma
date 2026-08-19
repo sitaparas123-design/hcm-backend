@@ -129,7 +129,7 @@ model Organization {
   websiteUrl   String?
   industry     String?
   companySize  String?
-  logoUrl      String?
+  logoUrl      String?  @db.LongText
   address      String?
   taxId        String?
   primaryEmail String?
@@ -315,10 +315,10 @@ model CandidateProfile {
   role              String?
   currentSalary     String?
   noticePeriod      String?
-  avatarUrl         String?
-  resumeUrl         String?
-  identityProofUrl  String?
-  educationProofUrl String?
+  avatarUrl         String?   @db.LongText
+  resumeUrl         String?   @db.LongText
+  identityProofUrl  String?   @db.LongText
+  educationProofUrl String?   @db.LongText
   expectedSalary    String?
   experience        String?
   linkedin          String?

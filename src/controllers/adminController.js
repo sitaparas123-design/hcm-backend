@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const { ensureDefaultRoles } = require('../utils/roleSeeder');
 const { isWorkflowEnabled, processApproval } = require('../services/approval.service');
 const calendarResolver = require('../utils/calendarResolver');
+const { handleBase64Field, isBase64DataUrl } = require('../services/cloudUploadService');
 
 const roleToEnum = (role = '') => {
   const normalized = String(role).trim().toUpperCase().replace(/[\s-]+/g, '_');
@@ -170,6 +171,14 @@ const createOrganization = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: payload.error } });
     }
 
+    // Upload logo to Cloudinary if it's a base64 data URL
+    if (payload.data.logoUrl) {
+      payload.data.logoUrl = await handleBase64Field(
+        payload.data.logoUrl, null,
+        { folder: 'hcm/logos', filenamePrefix: 'logo' }
+      );
+    }
+
     const org = await prisma.organization.create({ data: payload.data });
     return res.status(201).json({ success: true, data: org, message: 'Organization created.' });
   } catch (err) { next(err); }
@@ -181,6 +190,15 @@ const updateOrganization = async (req, res, next) => {
     const payload = buildOrganizationPayload(req.body);
     if (payload.error) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: payload.error } });
+    }
+
+    // Upload logo to Cloudinary if it's a base64 data URL
+    if (payload.data.logoUrl) {
+      const existingOrg = await prisma.organization.findUnique({ where: { id: req.params.id } });
+      payload.data.logoUrl = await handleBase64Field(
+        payload.data.logoUrl, existingOrg?.logoUrl,
+        { folder: 'hcm/logos', filenamePrefix: 'logo' }
+      );
     }
 
     const org = await prisma.organization.update({

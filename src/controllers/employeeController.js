@@ -6,6 +6,7 @@
 const prisma = require('../config/prisma');
 const { z } = require('zod');
 const bcrypt = require('bcryptjs');
+const { handleBase64Field, isBase64DataUrl } = require('../services/cloudUploadService');
 const calendarResolver = require('../utils/calendarResolver');
 const { isWorkflowEnabled, startWorkflow } = require('../services/approval.service');
 
@@ -95,6 +96,14 @@ const updateProfile = async (req, res, next) => {
       language, timezone, dateFormat, emailNotif, pushNotif, weeklySummary
     } = req.body;
 
+    // If avatarUrl is a base64 data URL, upload to cloud (Cloudinary)
+    const profile = await prisma.employeeProfile.findUnique({ where: { userId: req.user.userId } });
+    const finalAvatarUrl = await handleBase64Field(
+      avatarUrl,
+      profile?.avatarUrl,
+      { folder: 'hcm/avatars', filenamePrefix: 'avatar' }
+    );
+
     const updated = await prisma.employeeProfile.update({
       where: { userId: req.user.userId },
       data: {
@@ -103,7 +112,7 @@ const updateProfile = async (req, res, next) => {
         gender,
         bloodGroup,
         address,
-        avatarUrl,
+        avatarUrl: finalAvatarUrl,
         emergencyName,
         emergencyPhone,
         emergencyRelation,

@@ -21,8 +21,7 @@ const downloadTemplate = (req, res, next) => {
   }
 };
 
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 
 // Helper to fuzzy match employee (duplicate logic from importService for preview)
 function findEmployeeByFuzzyId(userIdVal, allEmployees) {
