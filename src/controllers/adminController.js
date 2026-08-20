@@ -9,7 +9,7 @@ const bcrypt = require('bcryptjs');
 const { ensureDefaultRoles } = require('../utils/roleSeeder');
 const { isWorkflowEnabled, processApproval } = require('../services/approval.service');
 const calendarResolver = require('../utils/calendarResolver');
-const { handleBase64Field, isBase64DataUrl } = require('../services/cloudUploadService');
+const { handleBase64Field, isBase64DataUrl, uploadImage } = require('../services/cloudUploadService');
 
 const roleToEnum = (role = '') => {
   const normalized = String(role).trim().toUpperCase().replace(/[\s-]+/g, '_');
@@ -39,6 +39,7 @@ const organizationSchema = z.object({
   primaryEmail: optionalString(),
   supportPhone: optionalString(),
   timezone: optionalString(),
+  currency: optionalString(),
 });
 
 const buildOrganizationPayload = (body) => {
@@ -65,6 +66,7 @@ const buildOrganizationPayload = (body) => {
       primaryEmail: data.primaryEmail || null,
       supportPhone: data.supportPhone || null,
       timezone: data.timezone || null,
+      currency: data.currency || null,
     }
   };
 };
@@ -209,6 +211,69 @@ const updateOrganization = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// PATCH or POST /api/admin/organization/logo
+const updateOrganizationLogo = async (req, res, next) => {
+  try {
+    let logoUrl = null;
+
+    if (req.file) {
+      const result = await uploadImage(req.file, { folder: 'hcm/logos', filenamePrefix: 'logo' });
+      logoUrl = result.url;
+    } else if (req.body?.logo || req.body?.logoUrl || req.body?.file) {
+      const rawLogo = req.body.logo || req.body.logoUrl || req.body.file;
+      logoUrl = await handleBase64Field(rawLogo, null, { folder: 'hcm/logos', filenamePrefix: 'logo' });
+    }
+
+    if (!logoUrl) {
+      return res.status(400).json({ success: false, error: { message: 'No logo file or URL provided.' } });
+    }
+
+    let org = await prisma.organization.findFirst();
+    if (!org) {
+      org = await prisma.organization.create({
+        data: { name: 'Organization', logoUrl }
+      });
+    } else {
+      org = await prisma.organization.update({
+        where: { id: org.id },
+        data: { logoUrl }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Logo updated successfully',
+      data: {
+        organizationId: org.id,
+        logoUrl: org.logoUrl,
+        name: org.name
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// DELETE /api/admin/organization/logo
+const deleteOrganizationLogo = async (req, res, next) => {
+  try {
+    let org = await prisma.organization.findFirst();
+    if (org) {
+      org = await prisma.organization.update({
+        where: { id: org.id },
+        data: { logoUrl: null }
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Logo removed successfully',
+      data: { logoUrl: null }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─────────────────────────────────────────
 // DEPARTMENTS
 // ─────────────────────────────────────────
@@ -254,13 +319,34 @@ const validateNoCircularHierarchy = async (departmentId, proposedParentId) => {
 
 const getDepartments = async (req, res, next) => {
   try {
-    const departments = await prisma.department.findMany({
-      include: {
-        _count: { select: { employees: true, subDepartments: true } },
-      },
-      orderBy: { name: 'asc' },
+    const [departments, users] = await Promise.all([
+      prisma.department.findMany({
+        include: {
+          _count: { select: { employees: true, subDepartments: true } },
+        },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.user.findMany({
+        include: {
+          employeeProfile: { select: { fullName: true } },
+          candidateProfile: { select: { fullName: true } }
+        }
+      })
+    ]);
+
+    const validNames = new Set(
+      users.flatMap(u => [u.employeeProfile?.fullName, u.candidateProfile?.fullName, u.email]).filter(Boolean)
+    );
+
+    const mapped = departments.map(d => {
+      const isValidHead = d.head && d.head !== 'None' && validNames.has(d.head);
+      return {
+        ...d,
+        head: isValidHead ? d.head : 'None'
+      };
     });
-    return res.status(200).json({ success: true, data: departments });
+
+    return res.status(200).json({ success: true, data: mapped });
   } catch (err) { next(err); }
 };
 
@@ -438,8 +524,11 @@ const getAllUsers = async (req, res, next) => {
 
     const users = await prisma.user.findMany({
       where: {
-        role: { notIn: ['SUPERADMIN', 'CANDIDATE'] },
-        organizationId: organizationId,
+        role: { notIn: ['SUPERADMIN'] },
+        OR: [
+          { organizationId: organizationId },
+          { organizationId: null }
+        ]
       },
       include: {
         customRole: { select: { id: true, name: true, inheritsFrom: true, status: true } },
@@ -449,7 +538,8 @@ const getAllUsers = async (req, res, next) => {
             manager: true,
             compensationProfile: true,
           }
-        }
+        },
+        candidateProfile: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -474,8 +564,9 @@ const createUser = async (req, res, next) => {
       status: z.enum(['Active', 'Inactive', 'Pending']),
       address: z.string().trim().min(1, 'Residential address is required.'),
       img: z.string().optional(),
-      password: z.string().min(6).optional(),
-      monthlyCTC: z.number().optional().nullable(),
+      monthlyCTC: z.union([z.number(), z.string()]).optional().nullable(),
+      baseSalary: z.union([z.number(), z.string()]).optional().nullable(),
+      salary: z.union([z.number(), z.string()]).optional().nullable(),
       salaryStructureId: z.string().optional().nullable(),
       salaryVersionId: z.string().optional().nullable(),
       effectiveDate: z.string().optional().nullable(),
@@ -483,7 +574,7 @@ const createUser = async (req, res, next) => {
       shiftId: z.string().optional().nullable(),
       overtimePolicyId: z.string().optional().nullable(),
       salaryType: z.enum(['Monthly', 'Hourly']).optional(),
-      hourlyRate: z.number().optional().nullable(),
+      hourlyRate: z.union([z.number(), z.string()]).optional().nullable(),
     });
 
     const parsed = schema.safeParse(req.body);
@@ -495,6 +586,10 @@ const createUser = async (req, res, next) => {
     const role = roleToEnum(data.role);
     if (!['SUPERADMIN', 'ADMIN', 'HR', 'MANAGER', 'EMPLOYEE', 'CANDIDATE'].includes(role)) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid organization role.' } });
+    }
+
+    if (role === 'SUPERADMIN' && req.user?.role !== 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only SuperAdmin can assign SuperAdmin role.' } });
     }
 
     const [existingEmail, existingEmpId] = await Promise.all([
@@ -573,13 +668,14 @@ const createUser = async (req, res, next) => {
             departmentId: department.id,
             managerId,
             salaryType: data.salaryType || 'Monthly',
-            hourlyRate: data.hourlyRate || null,
+            hourlyRate: data.hourlyRate ? Number(data.hourlyRate) : null,
             shiftId: data.shiftId || null,
             overtimePolicyId: data.overtimePolicyId || null,
             compensationProfile: {
               create: {
-                monthlyCTC: data.monthlyCTC || 0,
-                annualCTC: (data.monthlyCTC || 0) * 12,
+                baseSalary: Number(data.monthlyCTC ?? data.baseSalary ?? data.salary ?? 0),
+                monthlyCTC: Number(data.monthlyCTC ?? data.baseSalary ?? data.salary ?? 0),
+                annualCTC: Number(data.monthlyCTC ?? data.baseSalary ?? data.salary ?? 0) * 12,
                 salaryStructureId: data.salaryStructureId || (defaultStructure ? defaultStructure.id : null),
                 salaryVersionId: data.salaryVersionId || (defaultStructure ? defaultStructure.currentVersionId : null),
                 effectiveDate: data.effectiveDate ? new Date(data.effectiveDate) : new Date(data.joinDate),
@@ -636,9 +732,17 @@ const changeUserRole = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid organization role.' } });
     }
 
+    if (role === 'SUPERADMIN' && req.user?.role !== 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only SuperAdmin can assign SuperAdmin role.' } });
+    }
+
     const targetUser = await prisma.user.findUnique({ where: { id: req.params.id } });
     if (!targetUser || targetUser.role === 'SUPERADMIN') {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
+    }
+
+    if (req.user?.organizationId && targetUser.organizationId && targetUser.organizationId !== req.user.organizationId && req.user.role !== 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Cannot modify user outside your organization.' } });
     }
 
     let validCustomRoleId = null;
@@ -683,6 +787,91 @@ const changeUserRole = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// POST /api/admin/users/:id/revoke-role
+const revokeUserRole = async (req, res, next) => {
+  try {
+    const targetUser = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      include: { customRole: true, employeeProfile: true, candidateProfile: true }
+    });
+    if (!targetUser || targetUser.role === 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
+    }
+
+    const previousRole = targetUser.customRole?.name || targetUser.role;
+    const fallbackRole = targetUser.role === 'CANDIDATE' ? 'CANDIDATE' : 'EMPLOYEE';
+    const userName = targetUser.employeeProfile?.fullName || targetUser.candidateProfile?.fullName || targetUser.email;
+
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { role: fallbackRole, customRoleId: null },
+      select: { id: true, email: true, role: true, customRoleId: true },
+    });
+
+    if (req.user?.userId) {
+      await prisma.auditLog.create({
+        data: {
+          userId: req.user.userId,
+          action: 'REVOKE_USER_ROLE',
+          details: `Revoked role "${previousRole}" from ${userName} (${user.email}). Reverted to ${fallbackRole}.`,
+          ipAddress: req.ip || req.socket.remoteAddress
+        }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: user,
+      message: `Role ${previousRole} revoked for ${user.email}.`
+    });
+  } catch (err) { next(err); }
+};
+
+// GET /api/admin/roles/history
+const getRoleHistory = async (req, res, next) => {
+  try {
+    const logs = await prisma.auditLog.findMany({
+      where: {
+        action: {
+          in: [
+            'UPDATE_USER_ROLE',
+            'CHANGE_USER_ROLE',
+            'REVOKE_USER_ROLE',
+            'ASSIGN_USER_ROLE',
+            'UPDATE_ROLE',
+            'CREATE_ROLE',
+            'DELETE_ROLE'
+          ]
+        }
+      },
+      include: {
+        user: {
+          select: {
+            email: true,
+            role: true,
+            employeeProfile: { select: { fullName: true, avatarUrl: true } }
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+
+    const formatted = logs.map(log => ({
+      id: log.id,
+      action: log.action,
+      details: log.details,
+      ipAddress: log.ipAddress,
+      createdAt: log.createdAt,
+      actor: log.user?.employeeProfile?.fullName || log.user?.email || 'Administrator',
+      actorEmail: log.user?.email || 'admin@hcm.ai',
+      actorRole: log.user?.role || 'SUPERADMIN'
+    }));
+
+    return res.status(200).json({ success: true, data: formatted });
+  } catch (err) { next(err); }
+};
+
 // PATCH /api/admin/users/:id/toggle-active
 const toggleUserActive = async (req, res, next) => {
   try {
@@ -690,6 +879,19 @@ const toggleUserActive = async (req, res, next) => {
     if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found.' } });
     if (user.role === 'SUPERADMIN') {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
+    }
+
+    if (req.user?.userId === req.params.id) {
+      return res.status(400).json({ success: false, error: { code: 'SELF_DEACTIVATION_BLOCKED', message: 'You cannot deactivate your own active admin account.' } });
+    }
+
+    if (user.role === 'ADMIN' && user.isActive) {
+      const activeAdminCount = await prisma.user.count({
+        where: { organizationId: user.organizationId, role: 'ADMIN', isActive: true }
+      });
+      if (activeAdminCount <= 1) {
+        return res.status(400).json({ success: false, error: { code: 'LAST_ADMIN_PROTECTED', message: 'Cannot deactivate the sole active Admin account in the organization.' } });
+      }
     }
 
     const updated = await prisma.user.update({
@@ -725,8 +927,12 @@ const updateUser = async (req, res, next) => {
       include: { employeeProfile: true }
     });
     if (!existingUser) return res.status(404).json({ success: false, error: { message: 'User not found' } });
-    if (existingUser.role === 'SUPERADMIN') {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
+    if (existingUser.role === 'SUPERADMIN' && req.user?.role !== 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden: Cannot edit a SuperAdmin' } });
+    }
+    
+    if (role && roleToEnum(role) === 'SUPERADMIN' && req.user?.role !== 'SUPERADMIN') {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only SuperAdmin can assign SuperAdmin role.' } });
     }
 
     let finalDeptId = departmentId;
@@ -783,6 +989,36 @@ const updateUser = async (req, res, next) => {
       include: { employeeProfile: true }
     });
 
+    const rawSalary = req.body.monthlyCTC ?? req.body.baseSalary ?? req.body.salary;
+    const salaryVal = rawSalary !== undefined && rawSalary !== null && rawSalary !== '' ? Number(rawSalary) : undefined;
+
+    if (existingUser.employeeProfile && salaryVal !== undefined && !isNaN(salaryVal)) {
+      const existingComp = await prisma.compensationProfile.findUnique({
+        where: { employeeId: existingUser.employeeProfile.id }
+      });
+      if (existingComp) {
+        await prisma.compensationProfile.update({
+          where: { employeeId: existingUser.employeeProfile.id },
+          data: {
+            baseSalary: salaryVal,
+            monthlyCTC: salaryVal,
+            annualCTC: salaryVal * 12
+          }
+        });
+      } else if (salaryVal > 0) {
+        await prisma.compensationProfile.create({
+          data: {
+            employeeId: existingUser.employeeProfile.id,
+            baseSalary: salaryVal,
+            monthlyCTC: salaryVal,
+            annualCTC: salaryVal * 12,
+            effectiveDate: new Date(),
+            status: 'Active'
+          }
+        });
+      }
+    }
+
     if (req.user) {
       await prisma.auditLog.create({
         data: {
@@ -800,26 +1036,140 @@ const updateUser = async (req, res, next) => {
 
 const deleteUser = async (req, res, next) => {
   try {
-    const existing = await prisma.user.findUnique({ where: { id: req.params.id } });
-    if (!existing) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found.' } });
+    const userId = req.params.id;
+    const existing = await prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        employeeProfile: true,
+        candidateProfile: true
+      }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found.' } });
+    }
+
     if (existing.role === 'SUPERADMIN') {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Superadmin user cannot be deleted.' } });
     }
 
-    await prisma.user.delete({ where: { id: req.params.id } });
+    await prisma.$transaction(async (tx) => {
+      // 1. Employee-related cleanup
+      if (existing.employeeProfile) {
+        const empId = existing.employeeProfile.id;
 
-    if (req.user && existing) {
-      await prisma.auditLog.create({
-        data: {
-          userId: req.user.userId,
-          action: 'DELETE_USER',
-          details: `Deleted user: ${existing.email}`,
-          ipAddress: req.ip || req.socket.remoteAddress
+        // Collect all entity IDs associated with this employee
+        const userLeaveIds = (await tx.leaveRequest.findMany({ where: { userId }, select: { id: true } })).map(l => l.id);
+        const userIncrementIds = (await tx.salaryIncrementRequest.findMany({ where: { employeeId: empId }, select: { id: true } })).map(i => i.id);
+        const userExitIds = (await tx.exitLifecycle.findMany({ where: { employeeId: empId }, select: { id: true } })).map(e => e.id);
+        const allEntityIds = [...userLeaveIds, ...userIncrementIds, ...userExitIds];
+
+        if (allEntityIds.length > 0) {
+          await tx.approvalLog.deleteMany({
+            where: { entityId: { in: allEntityIds } }
+          });
         }
+
+        // Unassign direct reports where this employee is the manager
+        await tx.employeeProfile.updateMany({
+          where: { managerId: empId },
+          data: { managerId: null }
+        });
+
+        // Delete interviews where this employee was the interviewer
+        await tx.interview.deleteMany({
+          where: { interviewerId: empId }
+        });
+
+        // Delete approval logs where this employee was the approver
+        await tx.approvalLog.deleteMany({
+          where: { approverId: empId }
+        });
+
+        // Delete other employee-linked records
+        await tx.payrollSnapshot.deleteMany({ where: { employeeId: empId } });
+        await tx.payslip.deleteMany({ where: { employeeId: empId } });
+        await tx.bonus.deleteMany({ where: { employeeId: empId } });
+        await tx.salaryIncrementRequest.deleteMany({ where: { employeeId: empId } });
+        await tx.employeeSalaryComponent.deleteMany({ where: { employeeId: empId } });
+        await tx.employeeDeduction.deleteMany({ where: { employeeId: empId } });
+        await tx.employeeBenefit.deleteMany({ where: { employeeId: empId } });
+        await tx.benefitClaim.deleteMany({ where: { employeeId: empId } });
+        await tx.performanceGoal.deleteMany({ where: { employeeId: empId } });
+        await tx.performanceReview.deleteMany({ where: { employeeId: empId } });
+        await tx.task.deleteMany({ where: { employeeId: empId } });
+        await tx.employeeSkill.deleteMany({ where: { employeeId: empId } });
+        await tx.compensationVersion.deleteMany({ where: { employeeId: empId } });
+        await tx.compensationProfile.deleteMany({ where: { employeeId: empId } });
+        await tx.exitLifecycle.deleteMany({ where: { employeeId: empId } });
+      }
+
+      // 2. Candidate-related cleanup
+      if (existing.candidateProfile) {
+        const candId = existing.candidateProfile.id;
+        const apps = await tx.jobApplication.findMany({
+          where: { candidateId: candId },
+          select: { id: true }
+        });
+        const appIds = apps.map(a => a.id);
+        if (appIds.length > 0) {
+          await tx.interview.deleteMany({ where: { applicationId: { in: appIds } } });
+          await tx.offer.deleteMany({ where: { applicationId: { in: appIds } } });
+          await tx.onboarding.deleteMany({ where: { applicationId: { in: appIds } } });
+          await tx.exitLifecycle.deleteMany({ where: { applicationId: { in: appIds } } });
+          await tx.jobApplication.deleteMany({ where: { id: { in: appIds } } });
+        }
+      }
+
+      // 3. User-level relations
+      const userNames = [
+        existing.email,
+        existing.employeeProfile?.fullName,
+        existing.candidateProfile?.fullName
+      ].filter(Boolean);
+
+      // Automatically unassign this user if they were head of any departments
+      await tx.department.updateMany({
+        where: { head: { in: userNames } },
+        data: { head: null }
       });
+
+      await tx.ticketMessage.deleteMany({ where: { senderId: userId } });
+      await tx.supportTicket.deleteMany({ where: { userId } });
+      await tx.attendanceLog.deleteMany({ where: { userId } });
+      await tx.leaveRequest.deleteMany({ where: { userId } });
+      await tx.document.deleteMany({ where: { userId } });
+      await tx.notification.deleteMany({ where: { userId } });
+      await tx.policyAcknowledgment.deleteMany({ where: { userId } });
+      await tx.customRole.updateMany({ where: { createdById: userId }, data: { createdById: null } });
+      await tx.customRole.updateMany({ where: { updatedById: userId }, data: { updatedById: null } });
+      await tx.auditLog.updateMany({ where: { userId }, data: { userId: null } });
+
+      // 4. Finally delete the user
+      await tx.user.delete({ where: { id: userId } });
+    });
+
+    if (existing) {
+      try {
+        let actorId = null;
+        if (req.user?.userId) {
+          const actorExists = await prisma.user.findUnique({ where: { id: req.user.userId } });
+          if (actorExists) actorId = actorExists.id;
+        }
+        await prisma.auditLog.create({
+          data: {
+            userId: actorId,
+            action: 'DELETE_USER',
+            details: `Deleted user: ${existing.email} (${existing.role})`,
+            ipAddress: req.ip || req.socket.remoteAddress
+          }
+        });
+      } catch (auditErr) {
+        console.error('Failed to create audit log on deleteUser:', auditErr);
+      }
     }
 
-    return res.status(200).json({ success: true, message: 'User deleted' });
+    return res.status(200).json({ success: true, message: 'User deleted successfully' });
   } catch (err) { next(err); }
 };
 
@@ -1083,12 +1433,77 @@ const markPayslipPaid = async (req, res, next) => {
 // GET /api/admin/audit-logs
 const getAuditLogs = async (req, res, next) => {
   try {
-    const logs = await prisma.auditLog.findMany({
-      include: { user: { select: { email: true, role: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const skip = (page - 1) * limit;
+
+    const { search, action, userId, startDate, endDate } = req.query;
+
+    const where = {};
+
+    let organizationId = req.user?.organizationId;
+    if (!organizationId) {
+      const defaultOrg = await prisma.organization.findFirst({ select: { id: true } });
+      organizationId = defaultOrg?.id;
+    }
+
+    if (organizationId) {
+      where.user = { organizationId };
+    }
+
+    if (search) {
+      where.OR = [
+        { action: { contains: search, mode: 'insensitive' } },
+        { details: { contains: search, mode: 'insensitive' } },
+        { ipAddress: { contains: search, mode: 'insensitive' } },
+        { user: { email: { contains: search, mode: 'insensitive' } } }
+      ];
+    }
+
+    if (action && action !== 'All') {
+      where.action = { contains: action, mode: 'insensitive' };
+    }
+
+    if (userId) {
+      where.userId = userId;
+    }
+
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = new Date(startDate);
+      if (endDate) where.createdAt.lte = new Date(endDate);
+    }
+
+    const [logs, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              role: true,
+              employeeProfile: { select: { fullName: true } }
+            }
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prisma.auditLog.count({ where })
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: logs,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit) || 1
+      }
     });
-    return res.status(200).json({ success: true, data: logs });
   } catch (err) { next(err); }
 };
 
@@ -1110,6 +1525,16 @@ const getPolicies = async (req, res, next) => {
 const createPolicy = async (req, res, next) => {
   try {
     const { name, category, department, owner, effectiveDate, expiryDate, version, requiresSignature, status, description, pdfName, pdfData, acknowledgments } = req.body;
+    
+    let finalPdfData = pdfData;
+    if (pdfData && typeof pdfData === 'string' && pdfData.includes('base64,')) {
+      finalPdfData = await handleBase64Field(
+        pdfData,
+        null,
+        { folder: 'hcm/policies', filenamePrefix: 'policy' }
+      );
+    }
+
     const policy = await prisma.policy.create({
       data: {
         name,
@@ -1123,7 +1548,7 @@ const createPolicy = async (req, res, next) => {
         ...(status && { status }),
         ...(description && { description }),
         ...(pdfName && { pdfName }),
-        ...(pdfData && { pdfData }),
+        ...(finalPdfData && { pdfData: finalPdfData }),
         ...(acknowledgments && { acknowledgments }),
       },
     });
@@ -1136,6 +1561,17 @@ const updatePolicy = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, category, department, owner, effectiveDate, expiryDate, version, requiresSignature, status, description, pdfName, pdfData, acknowledgments } = req.body;
+    
+    let finalPdfData = pdfData;
+    if (pdfData && typeof pdfData === 'string' && pdfData.includes('base64,')) {
+      const existing = await prisma.policy.findUnique({ where: { id } });
+      finalPdfData = await handleBase64Field(
+        pdfData,
+        existing?.pdfData,
+        { folder: 'hcm/policies', filenamePrefix: 'policy' }
+      );
+    }
+
     const policy = await prisma.policy.update({
       where: { id },
       data: {
@@ -1148,9 +1584,9 @@ const updatePolicy = async (req, res, next) => {
         ...(version && { version }),
         ...(requiresSignature !== undefined && { requiresSignature }),
         ...(status && { status }),
-        ...(description !== undefined && { description }),
-        ...(pdfName !== undefined && { pdfName }),
-        ...(pdfData !== undefined && { pdfData }),
+        ...(description && { description }),
+        ...(pdfName && { pdfName }),
+        ...(finalPdfData && { pdfData: finalPdfData }),
         ...(acknowledgments && { acknowledgments }),
       },
     });
@@ -1441,7 +1877,26 @@ const getHolidays = async (req, res, next) => {
 
 const createHoliday = async (req, res, next) => {
   try {
-    const holiday = await prisma.holiday.create({ data: req.body });
+    const { name, date, type, region, status, repeat, description, calendarId } = req.body;
+    let holidayType = 'PUBLIC';
+    if (type) {
+      const upper = type.toUpperCase();
+      if (['PUBLIC', 'OPTIONAL', 'RESTRICTED', 'COMPANY'].includes(upper)) {
+        holidayType = upper;
+      }
+    }
+    const holiday = await prisma.holiday.create({
+      data: {
+        name: name || 'Holiday',
+        date: String(date || new Date().toISOString().split('T')[0]),
+        type: holidayType,
+        region: region || 'All Regions',
+        status: status || 'Upcoming',
+        repeat: Boolean(repeat),
+        description: description || null,
+        ...(calendarId && { calendarId })
+      }
+    });
     return res.status(201).json({ success: true, data: holiday });
   } catch (err) { next(err); }
 };
@@ -1449,9 +1904,25 @@ const createHoliday = async (req, res, next) => {
 const updateHoliday = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { name, date, type, region, status, repeat, description, calendarId } = req.body;
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (date !== undefined) updateData.date = String(date);
+    if (type !== undefined) {
+      const upper = type.toUpperCase();
+      if (['PUBLIC', 'OPTIONAL', 'RESTRICTED', 'COMPANY'].includes(upper)) {
+        updateData.type = upper;
+      }
+    }
+    if (region !== undefined) updateData.region = region;
+    if (status !== undefined) updateData.status = status;
+    if (repeat !== undefined) updateData.repeat = Boolean(repeat);
+    if (description !== undefined) updateData.description = description;
+    if (calendarId !== undefined) updateData.calendarId = calendarId || null;
+
     const holiday = await prisma.holiday.update({
       where: { id },
-      data: req.body
+      data: updateData
     });
     return res.status(200).json({ success: true, data: holiday });
   } catch (err) { next(err); }
@@ -1882,15 +2353,16 @@ const overrideResignation = async (req, res, next) => {
 module.exports = {
   getDashboardStats,
   getOrganization, createOrganization, updateOrganization,
+  updateOrganizationLogo, deleteOrganizationLogo,
   getDepartments, createDepartment, updateDepartment, deleteDepartment,
-  getAllUsers, createUser, updateUser, changeUserRole, toggleUserActive, deleteUser,
+  getAllUsers, createUser, updateUser, changeUserRole, revokeUserRole, toggleUserActive, deleteUser,
   getAllPayslips, generatePayslip, markPayslipPaid,
   getAuditLogs,
   getPolicies, createPolicy, updatePolicy, deletePolicy,
   toggleArchivePolicy,
   renewPolicy,
   sendPolicyReminder,
-  getRoles, createRole, updateRole, deleteRole,
+  getRoles, createRole, updateRole, deleteRole, getRoleHistory,
   getHolidays, createHoliday, updateHoliday, deleteHoliday,
   getBenefitPlans, createBenefitPlan, updateBenefitPlan, deleteBenefitPlan,
   getAiModules, updateAiModule, getAiLogs, createAiLog,

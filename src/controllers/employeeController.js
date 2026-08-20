@@ -6,7 +6,7 @@
 const prisma = require('../config/prisma');
 const { z } = require('zod');
 const bcrypt = require('bcryptjs');
-const { handleBase64Field, isBase64DataUrl } = require('../services/cloudUploadService');
+const { handleBase64Field, isBase64DataUrl, uploadDocument: uploadDocumentService } = require('../services/cloudUploadService');
 const calendarResolver = require('../utils/calendarResolver');
 const { isWorkflowEnabled, startWorkflow } = require('../services/approval.service');
 
@@ -19,6 +19,7 @@ const getOrCreateProfile = async (userId) => {
     manager: { select: { fullName: true, employeeId: true } },
     user: { select: { email: true, role: true } },
     shift: true,
+    compensationProfile: true,
   };
   let profile = await prisma.employeeProfile.findUnique({
     where: { userId },
@@ -92,16 +93,31 @@ const updateProfile = async (req, res, next) => {
   try {
     const {
       fullName, phone, gender, bloodGroup, address, avatarUrl,
+      identityProofUrl, educationProofUrl,
       emergencyName, emergencyPhone, emergencyRelation, dob, bio,
       language, timezone, dateFormat, emailNotif, pushNotif, weeklySummary
     } = req.body;
 
-    // If avatarUrl is a base64 data URL, upload to cloud (Cloudinary)
     const profile = await prisma.employeeProfile.findUnique({ where: { userId: req.user.userId } });
+    
+    // Avatar -> Cloudinary
     const finalAvatarUrl = await handleBase64Field(
       avatarUrl,
       profile?.avatarUrl,
       { folder: 'hcm/avatars', filenamePrefix: 'avatar' }
+    );
+
+    // Identity & Education Proofs -> ImageKit
+    const finalIdentityProofUrl = await handleBase64Field(
+      identityProofUrl,
+      profile?.identityProofUrl,
+      { folder: 'hcm/proofs', filenamePrefix: 'id_proof' }
+    );
+
+    const finalEducationProofUrl = await handleBase64Field(
+      educationProofUrl,
+      profile?.educationProofUrl,
+      { folder: 'hcm/proofs', filenamePrefix: 'edu_proof' }
     );
 
     const updated = await prisma.employeeProfile.update({
@@ -113,6 +129,8 @@ const updateProfile = async (req, res, next) => {
         bloodGroup,
         address,
         avatarUrl: finalAvatarUrl,
+        identityProofUrl: finalIdentityProofUrl,
+        educationProofUrl: finalEducationProofUrl,
         emergencyName,
         emergencyPhone,
         emergencyRelation,
@@ -313,6 +331,14 @@ const applyLeave = async (req, res, next) => {
     const startDateObj = new Date(parsed.data.startDate);
     const endDateObj = new Date(parsed.data.endDate);
 
+    if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_DATES', message: 'Invalid start date or end date format.' } });
+    }
+
+    if (startDateObj > endDateObj) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_DATE_RANGE', message: 'Start date cannot be after end date.' } });
+    }
+
     const empProfile = await prisma.employeeProfile.findUnique({
       where: { userId: req.user.userId },
       include: { manager: true }
@@ -348,6 +374,31 @@ const applyLeave = async (req, res, next) => {
 
     if (calculatedDays <= 0) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_LEAVE', message: 'Leave duration must be greater than 0 working days.' } });
+    }
+
+    if (parsed.data.leaveType !== 'Unpaid Leave') {
+      let allowance = 999;
+      if (parsed.data.leaveType === 'Sick Leave') allowance = 10;
+      else if (parsed.data.leaveType === 'Annual Leave') allowance = 15;
+      else if (parsed.data.leaveType === 'Casual Leave') allowance = 5;
+
+      const activeRequests = await prisma.leaveRequest.findMany({
+        where: {
+          userId: req.user.userId,
+          leaveType: parsed.data.leaveType,
+          status: { in: ['PENDING', 'APPROVED', 'MANAGER_APPROVED'] }
+        }
+      });
+      const usedDays = activeRequests.reduce((sum, r) => sum + r.totalDays, 0);
+      if (usedDays + calculatedDays > allowance) {
+        return res.status(400).json({ 
+          success: false, 
+          error: { 
+            code: 'INSUFFICIENT_BALANCE', 
+            message: `Insufficient leave balance. You have ${allowance - usedDays} days remaining, but requested ${calculatedDays} days.` 
+          } 
+        });
+      }
     }
     // ------------------------------------------------------------
 
@@ -515,28 +566,11 @@ const createTicket = async (req, res, next) => {
 
     let attachmentUrl = null;
     if (parsed.data.attachmentBase64) {
-      const fs = require('fs');
-      const path = require('path');
-      const match = parsed.data.attachmentBase64.match(/^data:(.*?);base64,/);
-      let ext = '.png';
-      if (match && match[1]) {
-        const mimeTypes = {
-          'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
-          'application/pdf': '.pdf', 'application/msword': '.doc',
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-          'application/vnd.ms-excel': '.xls',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-          'text/csv': '.csv', 'text/plain': '.txt'
-        };
-        ext = mimeTypes[match[1]] || '.bin';
-      }
-      const base64Data = parsed.data.attachmentBase64.replace(/^data:.*;base64,/, "");
-      const fileBuffer = Buffer.from(base64Data, 'base64');
-      const filename = `${Date.now()}_attachment${ext}`;
-      const uploadPath = path.join(__dirname, '../../public/uploads', filename);
-      fs.mkdirSync(path.dirname(uploadPath), { recursive: true });
-      fs.writeFileSync(uploadPath, fileBuffer);
-      attachmentUrl = `/uploads/${filename}`;
+      attachmentUrl = await handleBase64Field(
+        parsed.data.attachmentBase64,
+        null,
+        { folder: 'hcm/tickets', filenamePrefix: 'ticket' }
+      );
     }
 
     const ticket = await prisma.supportTicket.create({
@@ -571,28 +605,11 @@ const replyTicket = async (req, res, next) => {
 
     let attachmentUrl = null;
     if (attachmentBase64) {
-      const fs = require('fs');
-      const path = require('path');
-      const match = attachmentBase64.match(/^data:(.*?);base64,/);
-      let ext = '.png';
-      if (match && match[1]) {
-        const mimeTypes = {
-          'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
-          'application/pdf': '.pdf', 'application/msword': '.doc',
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-          'application/vnd.ms-excel': '.xls',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-          'text/csv': '.csv', 'text/plain': '.txt'
-        };
-        ext = mimeTypes[match[1]] || '.bin';
-      }
-      const base64Data = attachmentBase64.replace(/^data:.*;base64,/, "");
-      const fileBuffer = Buffer.from(base64Data, 'base64');
-      const filename = `${Date.now()}_attachment${ext}`;
-      const uploadPath = path.join(__dirname, '../../public/uploads', filename);
-      fs.mkdirSync(path.dirname(uploadPath), { recursive: true });
-      fs.writeFileSync(uploadPath, fileBuffer);
-      attachmentUrl = `/uploads/${filename}`;
+      attachmentUrl = await handleBase64Field(
+        attachmentBase64,
+        null,
+        { folder: 'hcm/tickets', filenamePrefix: 'ticket_msg' }
+      );
     }
 
     const msg = await prisma.ticketMessage.create({
@@ -789,9 +806,14 @@ const submitBenefitClaim = async (req, res, next) => {
   try {
     const profile = await getOrCreateProfile(req.user.userId);
 
-    const { type, amount, date, description } = req.body;
+    const { type, amount, date, description, receiptUrl, receiptBase64, file } = req.body;
     if (!type || !amount) {
       return res.status(400).json({ success: false, error: { message: 'Type and amount are required' } });
+    }
+
+    let finalReceiptUrl = receiptUrl || null;
+    if (receiptBase64 || (file && typeof file === 'string' && file.startsWith('data:'))) {
+      finalReceiptUrl = await handleBase64Field(receiptBase64 || file, finalReceiptUrl, { folder: 'hcm/receipts', filenamePrefix: 'receipt' });
     }
 
     const settings = await prisma.globalSettings.findUnique({ where: { id: 'global-settings' } });
@@ -804,7 +826,8 @@ const submitBenefitClaim = async (req, res, next) => {
         action: 'Submitted',
         actor: profile.fullName,
         date: new Date().toISOString(),
-        comment: 'Claim submitted by employee'
+        comment: 'Claim submitted by employee',
+        receiptUrl: finalReceiptUrl
       }
     ];
 
@@ -812,7 +835,7 @@ const submitBenefitClaim = async (req, res, next) => {
       data: {
         employeeId: profile.id,
         title: type,
-        provider: description || 'General',
+        provider: finalReceiptUrl ? `${description || 'General'} [Receipt: ${finalReceiptUrl}]` : (description || 'General'),
         amount: parseFloat(amount) || 0,
         status: 'Pending', // Legacy status field kept for compatibility
         managerStatus,
@@ -900,23 +923,26 @@ const getDocuments = async (req, res, next) => {
 
 const uploadDocument = async (req, res, next) => {
   try {
-    const { name, category, size, fileBase64 } = req.body;
-    if (!name || !category) {
-      return res.status(400).json({ success: false, error: { message: 'Name and Category are required' } });
+    const name = req.body?.name || req.file?.originalname || 'Document.pdf';
+    const category = req.body?.category || 'Other';
+    const size = req.body?.size || (req.file ? `${(req.file.size / 1024).toFixed(1)} KB` : '1.0 MB');
+    
+    let url = req.body?.url || null;
+
+    if (req.file) {
+      const uploadRes = await uploadDocumentService(req.file, { folder: 'hcm/documents', filenamePrefix: 'doc' });
+      url = uploadRes.url;
+    } else if (req.body?.fileBase64 || req.body?.content || req.body?.file) {
+      const payloadBase64 = req.body.fileBase64 || req.body.content || req.body.file;
+      url = await handleBase64Field(
+        payloadBase64,
+        null,
+        { folder: 'hcm/documents', filenamePrefix: 'doc' }
+      );
     }
 
-    const baseUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
-    let url = `${baseUrl}/uploads/placeholder.pdf`;
-    if (fileBase64) {
-      const fs = require('fs');
-      const path = require('path');
-      const base64Data = fileBase64.replace(/^data:.*;base64,/, "");
-      const fileBuffer = Buffer.from(base64Data, 'base64');
-      const filename = `${Date.now()}_${name}`;
-      const uploadPath = path.join(__dirname, '../../public/uploads', filename);
-      fs.mkdirSync(path.dirname(uploadPath), { recursive: true });
-      fs.writeFileSync(uploadPath, fileBuffer);
-      url = `${baseUrl}/uploads/${filename}`;
+    if (!url) {
+      return res.status(400).json({ success: false, error: { message: 'Document file or content is required.' } });
     }
 
     const doc = await prisma.document.create({
@@ -924,13 +950,17 @@ const uploadDocument = async (req, res, next) => {
         userId: req.user.userId,
         name,
         category,
-        size: size || '1.5 MB',
+        size,
         url,
         date: new Date().toISOString().split('T')[0]
       }
     });
 
-    return res.status(201).json({ success: true, data: doc, message: 'Document uploaded' });
+    return res.status(201).json({
+      success: true,
+      message: 'Document uploaded successfully',
+      data: doc
+    });
   } catch (err) { next(err); }
 };
 
@@ -950,17 +980,78 @@ const deleteDocument = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const createGoal = async (req, res, next) => {
+  try {
+    const profile = await getOrCreateProfile(req.user.userId);
+    const { title, priority, deadline, progress } = req.body;
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ success: false, error: { message: 'Goal title is required.' } });
+    }
+
+    const progVal = parseInt(progress);
+    const validatedProgress = (!isNaN(progVal) && progVal >= 0 && progVal <= 100) ? progVal : 0;
+
+    let deadlineDate = null;
+    if (deadline) {
+      const parsedDate = new Date(deadline);
+      if (!isNaN(parsedDate.getTime())) {
+        deadlineDate = parsedDate;
+      }
+    }
+
+    const goal = await prisma.performanceGoal.create({
+      data: {
+        employeeId: profile.id,
+        title: title.trim(),
+        priority: priority || 'Medium',
+        deadline: deadlineDate,
+        progress: validatedProgress
+      }
+    });
+
+    return res.status(201).json({ success: true, data: goal, message: 'Goal created successfully.' });
+  } catch (err) { next(err); }
+};
+
 const updateGoalProgress = async (req, res, next) => {
   try {
+    const profile = await getOrCreateProfile(req.user.userId);
     const { id } = req.params;
     const { progress } = req.body;
 
+    const progVal = parseInt(progress);
+    if (isNaN(progVal) || progVal < 0 || progVal > 100) {
+      return res.status(400).json({ success: false, error: { message: 'Progress must be a number between 0 and 100.' } });
+    }
+
+    const existingGoal = await prisma.performanceGoal.findUnique({ where: { id } });
+    if (!existingGoal || existingGoal.employeeId !== profile.id) {
+      return res.status(404).json({ success: false, error: { message: 'Goal not found or access denied.' } });
+    }
+
     const updated = await prisma.performanceGoal.update({
       where: { id },
-      data: { progress: parseInt(progress) || 0 }
+      data: { progress: progVal }
     });
 
-    return res.status(200).json({ success: true, data: updated, message: 'Goal progress updated' });
+    return res.status(200).json({ success: true, data: updated, message: 'Goal progress updated successfully.' });
+  } catch (err) { next(err); }
+};
+
+const deleteGoal = async (req, res, next) => {
+  try {
+    const profile = await getOrCreateProfile(req.user.userId);
+    const { id } = req.params;
+
+    const existingGoal = await prisma.performanceGoal.findUnique({ where: { id } });
+    if (!existingGoal || existingGoal.employeeId !== profile.id) {
+      return res.status(404).json({ success: false, error: { message: 'Goal not found or access denied.' } });
+    }
+
+    await prisma.performanceGoal.delete({ where: { id } });
+
+    return res.status(200).json({ success: true, message: 'Goal deleted successfully.' });
   } catch (err) { next(err); }
 };
 
@@ -1146,7 +1237,7 @@ module.exports = {
   getProfile, updateProfile,
   clockIn, clockOut, getAttendance,
   getLeaves, applyLeave, cancelLeave,
-  getPayslips, getPerformance, updateGoalProgress, upsertSkill, deleteSkill,
+  getPayslips, getPerformance, createGoal, updateGoalProgress, deleteGoal, upsertSkill, deleteSkill,
   getTickets, createTicket, replyTicket, deleteTicketMessage,
   getBenefits, submitBenefitClaim, getTasks,
   getHolidays, getAnnouncements,

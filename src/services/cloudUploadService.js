@@ -75,14 +75,17 @@ function getImageKit() {
 function parseBase64DataUrl(dataUrl) {
   if (!dataUrl || typeof dataUrl !== 'string') return null;
 
-  const match = dataUrl.match(/^data:([A-Za-z-+/.]+);base64,(.+)$/);
-  if (!match || match.length !== 3) return null;
+  const match = dataUrl.match(/^data:([a-zA-Z0-9_\-+./]+);base64,([\s\S]+)$/);
+  if (!match || match.length < 3) return null;
+
+  const mimeType = match[1];
+  const base64Clean = match[2].replace(/\s/g, '');
 
   return {
-    mimeType: match[1],
-    base64Data: match[2],
-    buffer: Buffer.from(match[2], 'base64'),
-    extension: getExtensionFromMime(match[1]),
+    mimeType,
+    base64Data: base64Clean,
+    buffer: Buffer.from(base64Clean, 'base64'),
+    extension: getExtensionFromMime(mimeType),
   };
 }
 
@@ -232,12 +235,16 @@ async function uploadDocument(input, options = {}) {
   const imagekit = getImageKit();
   if (imagekit) {
     try {
-      const result = await imagekit.upload({
+      const uploadParams = {
         file: parsed.base64Data, // base64 string (without data: prefix)
         fileName: originalName,
         folder,
         useUniqueFileName: true,
-      });
+      };
+
+      const result = imagekit.files?.upload
+        ? await imagekit.files.upload(uploadParams)
+        : await imagekit.upload(uploadParams);
 
       console.log(`[CloudUpload] Document uploaded to ImageKit: ${result.url}`);
       return {
@@ -310,7 +317,11 @@ async function deleteDocument(fileId) {
   const imagekit = getImageKit();
   if (imagekit) {
     try {
-      await imagekit.deleteFile(fileId);
+      if (imagekit.files?.delete) {
+        await imagekit.files.delete(fileId);
+      } else {
+        await imagekit.deleteFile(fileId);
+      }
       console.log(`[CloudUpload] Deleted from ImageKit: ${fileId}`);
       return true;
     } catch (err) {
